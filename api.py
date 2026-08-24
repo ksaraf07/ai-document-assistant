@@ -5,12 +5,15 @@ from pydantic import BaseModel
 from pwdlib import PasswordHash
 import ollama
 import math
-import os
 import sqlite3
 import os
 import jwt
 from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
+from fastapi import Depends
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+
+security = HTTPBearer()
 
 load_dotenv()
 SECRET_KEY = os.environ.get("SECRET_KEY")
@@ -140,6 +143,23 @@ def create_access_token(username: str):
     return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
 
 
+
+def get_current_username(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    token = credentials.credentials
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        username = payload.get("sub")
+        if username is None:
+            raise HTTPException(status_code=401, detail="Invalid token")
+        return username
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token expired, please log in again")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+class Question(BaseModel):
+    question: str
+    
 @app.post("/login")
 def login(payload: UserLogin):
     connection = get_user_db_connection()
@@ -155,12 +175,8 @@ def login(payload: UserLogin):
     return {"access_token": token, "token_type": "bearer"}
 
 
-class Question(BaseModel):
-    question: str
-
-
 @app.post("/ask")
-def ask(payload: Question):
+def ask(payload: Question, username: str = Depends(get_current_username)):
     question_embedding = get_embedding(payload.question)
     similarities = [cosine_similarity(question_embedding, emb) for emb in chunk_embeddings]
 
