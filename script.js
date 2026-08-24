@@ -24,8 +24,8 @@ askButton.addEventListener("click", async function () {
 
         answerBox.innerHTML = `
             <p>${data.answer}</p>
-            <p><em>Source: ${data.source}</em></p>
-        `;
+            <p><em>Sources: ${data.sources.join(", ")}</em></p>
+        `;  
 
     } catch (error) {
         answerBox.textContent = "Could not connect to the backend.";
