@@ -38,26 +38,31 @@ print(f"Loaded {len(all_chunks)} chunks from {file_count} files")
 print("Turning each chunk into numbers...")
 chunk_embeddings = [get_embedding(chunk) for _, chunk in all_chunks]
 
-question = input("Ask something: ")
-question_embedding = get_embedding(question)
+print("\nReady! Type a question, or type 'quit' to exit.\n")
 
-similarities = [cosine_similarity(question_embedding, emb) for emb in chunk_embeddings]
-best_index = similarities.index(max(similarities))
-best_filename, best_chunk = all_chunks[best_index]
+while True:
+    question = input("Ask something: ")
 
-print(f"\nMost relevant chunk (from {best_filename}):")
-print(best_chunk)
-print()
+    if question.lower() == "quit":
+        break
 
-prompt = f"""Here is a relevant excerpt from a document called "{best_filename}":
+    question_embedding = get_embedding(question)
+
+    similarities = [cosine_similarity(question_embedding, emb) for emb in chunk_embeddings]
+    best_index = similarities.index(max(similarities))
+    best_filename, best_chunk = all_chunks[best_index]
+
+    prompt = f"""Here is a relevant excerpt from a document called "{best_filename}":
 
 {best_chunk}
 
 Based on the excerpt above, answer this question: {question}"""
 
-response = ollama.chat(
-    model="llama3.2",
-    messages=[{"role": "user", "content": prompt}]
-)
+    response = ollama.chat(
+        model="llama3.2",
+        messages=[{"role": "user", "content": prompt}]
+    )
 
-print(response["message"]["content"])
+    print(f"\n(from {best_filename})")
+    print(response["message"]["content"])
+    print()
