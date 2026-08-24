@@ -1,21 +1,51 @@
 from contextlib import asynccontextmanager
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from pwdlib import PasswordHash
 import ollama
 import math
 import os
-
-MIN_SIMILARITY = 0.5
+import sqlite3
 
 DOCUMENTS_FOLDER = "documents"
-CHUNK_SIZE = 500       # characters per chunk
-CHUNK_OVERLAP = 50     # characters shared between neighboring chunks
-TOP_K = 3              # how many chunks to hand the AI
+CHUNK_SIZE = 500
+CHUNK_OVERLAP = 50
+TOP_K = 3
+MIN_SIMILARITY = 0.5
 
 all_chunks = []
 chunk_embeddings = []
 
+password_hash = PasswordHash.recommended()
+
+
+# ---------- User accounts (SQLite, same pattern as your expense tracker) ----------
+
+def get_user_db_connection():
+    return sqlite3.connect("users.db")
+
+
+def init_users_table():
+    connection = get_user_db_connection()
+    cursor = connection.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT UNIQUE NOT NULL,
+            hashed_password TEXT NOT NULL
+        )
+    """)
+    connection.commit()
+    connection.close()
+
+
+class UserRegister(BaseModel):
+    username: str
+    password: str
+
+
+# ---------- RAG logic (unchanged from before) ----------
 
 def get_embedding(text):
     response = ollama.embed(model="nomic-embed-text", input=text)
@@ -37,7 +67,7 @@ def split_into_chunks(text, chunk_size=CHUNK_SIZE, overlap=CHUNK_OVERLAP):
         piece = text[start:end].strip()
         if piece:
             chunks.append(piece)
-        start += chunk_size - overlap  # step forward, but re-cover the overlap
+        start += chunk_size - overlap
     return chunks
 
 
@@ -55,6 +85,7 @@ def load_chunks():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global all_chunks, chunk_embeddings
+    init_users_table()
     print("Loading documents and computing embeddings...")
     all_chunks = load_chunks()
     chunk_embeddings = [get_embedding(chunk) for _, chunk in all_chunks]
@@ -72,6 +103,29 @@ app.add_middleware(
 )
 
 
+@app.post("/register")
+def register(payload: UserRegister):
+    connection = get_user_db_connection()
+    cursor = connection.cursor()
+
+    cursor.execute("SELECT id FROM users WHERE username = ?", (payload.username,))
+    existing = cursor.fetchone()
+
+    if existing:
+        connection.close()
+        raise HTTPException(status_code=400, detail="Username already taken")
+
+    hashed = password_hash.hash(payload.password)
+    cursor.execute(
+        "INSERT INTO users (username, hashed_password) VALUES (?, ?)",
+        (payload.username, hashed)
+    )
+    connection.commit()
+    connection.close()
+
+    return {"message": "User created", "username": payload.username}
+
+
 class Question(BaseModel):
     question: str
 
@@ -82,9 +136,7 @@ def ask(payload: Question):
     similarities = [cosine_similarity(question_embedding, emb) for emb in chunk_embeddings]
 
     ranked_indices = sorted(range(len(similarities)), key=lambda i: similarities[i], reverse=True)
-
     top_indices = [i for i in ranked_indices if similarities[i] >= MIN_SIMILARITY][:TOP_K]
-
     if not top_indices:
         top_indices = ranked_indices[:1]
 
