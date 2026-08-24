@@ -7,6 +7,15 @@ import ollama
 import math
 import os
 import sqlite3
+import os
+import jwt
+from datetime import datetime, timedelta, timezone
+from dotenv import load_dotenv
+
+load_dotenv()
+SECRET_KEY = os.environ.get("SECRET_KEY")
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24  # token stays valid for 1 day
 
 DOCUMENTS_FOLDER = "documents"
 CHUNK_SIZE = 500
@@ -18,9 +27,6 @@ all_chunks = []
 chunk_embeddings = []
 
 password_hash = PasswordHash.recommended()
-
-
-# ---------- User accounts (SQLite, same pattern as your expense tracker) ----------
 
 def get_user_db_connection():
     return sqlite3.connect("users.db")
@@ -44,8 +50,6 @@ class UserRegister(BaseModel):
     username: str
     password: str
 
-
-# ---------- RAG logic (unchanged from before) ----------
 
 def get_embedding(text):
     response = ollama.embed(model="nomic-embed-text", input=text)
@@ -124,6 +128,31 @@ def register(payload: UserRegister):
     connection.close()
 
     return {"message": "User created", "username": payload.username}
+
+class UserLogin(BaseModel):
+    username: str
+    password: str
+
+
+def create_access_token(username: str):
+    expire = datetime.now(timezone.utc) + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    payload = {"sub": username, "exp": expire}
+    return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
+
+
+@app.post("/login")
+def login(payload: UserLogin):
+    connection = get_user_db_connection()
+    cursor = connection.cursor()
+    cursor.execute("SELECT hashed_password FROM users WHERE username = ?", (payload.username,))
+    row = cursor.fetchone()
+    connection.close()
+
+    if row is None or not password_hash.verify(payload.password, row[0]):
+        raise HTTPException(status_code=401, detail="Incorrect username or password")
+
+    token = create_access_token(payload.username)
+    return {"access_token": token, "token_type": "bearer"}
 
 
 class Question(BaseModel):
