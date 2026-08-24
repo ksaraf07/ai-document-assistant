@@ -4,6 +4,7 @@ from pydantic import BaseModel
 import ollama
 import math
 import os
+from fastapi.middleware.cors import CORSMiddleware
 
 DOCUMENTS_FOLDER = "documents"
 
@@ -49,6 +50,13 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 class Question(BaseModel):
