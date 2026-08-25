@@ -12,7 +12,21 @@ const askButton = document.getElementById("ask-button");
 const questionInput = document.getElementById("question");
 const answerBox = document.getElementById("answer-box");
 
+const fileInput = document.getElementById("file-input");
+const uploadButton = document.getElementById("upload-button");
+const uploadMessage = document.getElementById("upload-message");
+
 const API_URL = "http://127.0.0.1:8000";
+
+function formatErrorDetail(detail) {
+    if (typeof detail === "string") {
+        return detail;
+    }
+    if (Array.isArray(detail)) {
+        return detail.map(function (err) { return err.msg; }).join(", ");
+    }
+    return "Something went wrong.";
+}
 
 function showLoggedIn(username) {
     authSection.style.display = "none";
@@ -32,16 +46,6 @@ if (savedToken && savedUsername) {
     showLoggedIn(savedUsername);
 } else {
     showLoggedOut();
-}
-
-function formatErrorDetail(detail) {
-    if (typeof detail === "string") {
-        return detail;
-    }
-    if (Array.isArray(detail)) {
-        return detail.map(function (err) { return err.msg; }).join(", ");
-    }
-    return "Something went wrong.";
 }
 
 registerButton.addEventListener("click", async function () {
@@ -133,6 +137,11 @@ askButton.addEventListener("click", async function () {
 
         const data = await response.json();
 
+        if (!response.ok) {
+            answerBox.textContent = formatErrorDetail(data.detail);
+            return;
+        }
+
         answerBox.innerHTML = `
             <p>${data.answer}</p>
             <p><em>Sources: ${data.sources.join(", ")}</em></p>
@@ -140,6 +149,49 @@ askButton.addEventListener("click", async function () {
 
     } catch (error) {
         answerBox.textContent = "Could not connect to the backend.";
+        console.error(error);
+    }
+});
+
+uploadButton.addEventListener("click", async function () {
+    const file = fileInput.files[0];
+
+    if (!file) {
+        uploadMessage.textContent = "Choose a file first.";
+        return;
+    }
+
+    const token = localStorage.getItem("token");
+
+    // Files get packed into a FormData "envelope" instead of JSON
+    const formData = new FormData();
+    formData.append("file", file);
+
+    uploadMessage.textContent = "Uploading...";
+
+    try {
+        const response = await fetch(`${API_URL}/documents/upload`, {
+            method: "POST",
+            headers: {
+                "Authorization": `Bearer ${token}`
+                // Notice: no "Content-Type" header here on purpose.
+                // The browser sets it automatically for FormData, boundary and all.
+            },
+            body: formData
+        });
+
+        const data = await response.json();
+
+        if (!response.ok) {
+            uploadMessage.textContent = formatErrorDetail(data.detail);
+            return;
+        }
+
+        uploadMessage.textContent = `Uploaded "${data.filename}" (${data.total_chunks} chunks total).`;
+        fileInput.value = "";
+
+    } catch (error) {
+        uploadMessage.textContent = "Could not connect to the backend.";
         console.error(error);
     }
 });
