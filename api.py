@@ -12,6 +12,8 @@ from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 from fastapi import Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from pydantic import BaseModel, Field
+
 
 security = HTTPBearer()
 
@@ -50,8 +52,8 @@ def init_users_table():
 
 
 class UserRegister(BaseModel):
-    username: str
-    password: str
+    username: str = Field(min_length=3, max_length=50)
+    password: str = Field(min_length=6)
 
 
 def get_embedding(text):

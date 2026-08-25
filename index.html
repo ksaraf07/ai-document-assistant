@@ -7,10 +7,24 @@
 <body>
     <h1>Ask Your Documents</h1>
 
-    <input type="text" id="question" placeholder="Ask something...">
-    <button id="ask-button">Ask</button>
+    <!-- Shown when logged out -->
+    <div id="auth-section">
+        <input type="text" id="auth-username" placeholder="Username">
+        <input type="password" id="auth-password" placeholder="Password">
+        <button id="login-button">Log In</button>
+        <button id="register-button">Register</button>
+        <p id="auth-message"></p>
+    </div>
 
-    <div id="answer-box"></div>
+    <!-- Shown when logged in -->
+    <div id="app-section" style="display: none;">
+        <p>Logged in as <strong id="current-username"></strong> &mdash; <button id="logout-button">Log out</button></p>
+
+        <input type="text" id="question" placeholder="Ask something...">
+        <button id="ask-button">Ask</button>
+
+        <div id="answer-box"></div>
+    </div>
 
     <script src="script.js"></script>
 </body>
