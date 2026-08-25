@@ -1,26 +1,21 @@
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from pwdlib import PasswordHash
-import ollama
-import math
-import sqlite3
-import os
-import jwt
-from datetime import datetime, timedelta, timezone
-from dotenv import load_dotenv
-from fastapi import Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, Field
-
-
-security = HTTPBearer()
+from pwdlib import PasswordHash
+from datetime import datetime, timedelta, timezone
+import ollama
+import math
+import os
+import sqlite3
+import jwt
+from dotenv import load_dotenv
 
 load_dotenv()
 SECRET_KEY = os.environ.get("SECRET_KEY")
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24  # token stays valid for 1 day
+ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24
 
 DOCUMENTS_FOLDER = "documents"
 CHUNK_SIZE = 500
@@ -28,10 +23,14 @@ CHUNK_OVERLAP = 50
 TOP_K = 3
 MIN_SIMILARITY = 0.5
 
-all_chunks = []
-chunk_embeddings = []
-
+security = HTTPBearer()
 password_hash = PasswordHash.recommended()
+
+# username -> {"chunks": [(filename, text), ...], "embeddings": [...]}
+user_index = {}
+
+
+# ---------- Users (unchanged) ----------
 
 def get_user_db_connection():
     return sqlite3.connect("users.db")
@@ -55,6 +54,33 @@ class UserRegister(BaseModel):
     username: str = Field(min_length=3, max_length=50)
     password: str = Field(min_length=6)
 
+
+class UserLogin(BaseModel):
+    username: str
+    password: str
+
+
+def create_access_token(username: str):
+    expire = datetime.now(timezone.utc) + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    payload = {"sub": username, "exp": expire}
+    return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
+
+
+def get_current_username(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    token = credentials.credentials
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        username = payload.get("sub")
+        if username is None:
+            raise HTTPException(status_code=401, detail="Invalid token")
+        return username
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token expired, please log in again")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+
+# ---------- RAG helpers ----------
 
 def get_embedding(text):
     response = ollama.embed(model="nomic-embed-text", input=text)
@@ -80,25 +106,35 @@ def split_into_chunks(text, chunk_size=CHUNK_SIZE, overlap=CHUNK_OVERLAP):
     return chunks
 
 
-def load_chunks():
+def load_user_documents(username):
+    """Read every file in this user's folder, chunk it, embed it."""
+    user_folder = os.path.join(DOCUMENTS_FOLDER, username)
     chunks = []
-    for filename in os.listdir(DOCUMENTS_FOLDER):
-        filepath = os.path.join(DOCUMENTS_FOLDER, filename)
-        with open(filepath, "r") as file:
-            text = file.read()
-        for piece in split_into_chunks(text):
-            chunks.append((filename, piece))
-    return chunks
+
+    if os.path.exists(user_folder):
+        for filename in os.listdir(user_folder):
+            filepath = os.path.join(user_folder, filename)
+            with open(filepath, "r") as file:
+                text = file.read()
+            for piece in split_into_chunks(text):
+                chunks.append((filename, piece))
+
+    embeddings = [get_embedding(chunk) for _, chunk in chunks]
+    return {"chunks": chunks, "embeddings": embeddings}
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global all_chunks, chunk_embeddings
     init_users_table()
-    print("Loading documents and computing embeddings...")
-    all_chunks = load_chunks()
-    chunk_embeddings = [get_embedding(chunk) for _, chunk in all_chunks]
-    print(f"Ready with {len(all_chunks)} chunks")
+    os.makedirs(DOCUMENTS_FOLDER, exist_ok=True)
+
+    print("Loading each user's documents...")
+    for username in os.listdir(DOCUMENTS_FOLDER):
+        user_folder = os.path.join(DOCUMENTS_FOLDER, username)
+        if os.path.isdir(user_folder):
+            user_index[username] = load_user_documents(username)
+            print(f"  {username}: {len(user_index[username]['chunks'])} chunks")
+
     yield
 
 
@@ -116,11 +152,8 @@ app.add_middleware(
 def register(payload: UserRegister):
     connection = get_user_db_connection()
     cursor = connection.cursor()
-
     cursor.execute("SELECT id FROM users WHERE username = ?", (payload.username,))
-    existing = cursor.fetchone()
-
-    if existing:
+    if cursor.fetchone():
         connection.close()
         raise HTTPException(status_code=400, detail="Username already taken")
 
@@ -131,37 +164,9 @@ def register(payload: UserRegister):
     )
     connection.commit()
     connection.close()
-
     return {"message": "User created", "username": payload.username}
 
-class UserLogin(BaseModel):
-    username: str
-    password: str
 
-
-def create_access_token(username: str):
-    expire = datetime.now(timezone.utc) + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    payload = {"sub": username, "exp": expire}
-    return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
-
-
-
-def get_current_username(credentials: HTTPAuthorizationCredentials = Depends(security)):
-    token = credentials.credentials
-    try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        username = payload.get("sub")
-        if username is None:
-            raise HTTPException(status_code=401, detail="Invalid token")
-        return username
-    except jwt.ExpiredSignatureError:
-        raise HTTPException(status_code=401, detail="Token expired, please log in again")
-    except jwt.InvalidTokenError:
-        raise HTTPException(status_code=401, detail="Invalid token")
-
-class Question(BaseModel):
-    question: str
-    
 @app.post("/login")
 def login(payload: UserLogin):
     connection = get_user_db_connection()
@@ -177,8 +182,39 @@ def login(payload: UserLogin):
     return {"access_token": token, "token_type": "bearer"}
 
 
+@app.post("/documents/upload")
+def upload_document(file: UploadFile = File(...), username: str = Depends(get_current_username)):
+    user_folder = os.path.join(DOCUMENTS_FOLDER, username)
+    os.makedirs(user_folder, exist_ok=True)
+
+    filepath = os.path.join(user_folder, file.filename)
+    contents = file.file.read()
+    with open(filepath, "wb") as f:
+        f.write(contents)
+
+    # Re-index just this user, so the new file is searchable immediately
+    user_index[username] = load_user_documents(username)
+
+    return {
+        "message": "File uploaded",
+        "filename": file.filename,
+        "total_chunks": len(user_index[username]["chunks"])
+    }
+
+class Question(BaseModel):
+    question: str
+
+
 @app.post("/ask")
 def ask(payload: Question, username: str = Depends(get_current_username)):
+    user_data = user_index.get(username)
+
+    if not user_data or not user_data["chunks"]:
+        raise HTTPException(status_code=404, detail="You haven't uploaded any documents yet")
+
+    chunks = user_data["chunks"]
+    chunk_embeddings = user_data["embeddings"]
+
     question_embedding = get_embedding(payload.question)
     similarities = [cosine_similarity(question_embedding, emb) for emb in chunk_embeddings]
 
@@ -190,7 +226,7 @@ def ask(payload: Question, username: str = Depends(get_current_username)):
     context_parts = []
     sources = set()
     for i in top_indices:
-        filename, chunk = all_chunks[i]
+        filename, chunk = chunks[i]
         context_parts.append(f'From "{filename}":\n{chunk}')
         sources.add(filename)
 
