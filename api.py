@@ -8,9 +8,12 @@ from datetime import datetime, timedelta, timezone
 import ollama
 import math
 import os
+import re
 import sqlite3
 import jwt
 from dotenv import load_dotenv
+from pypdf import PdfReader
+import io
 
 load_dotenv()
 SECRET_KEY = os.environ.get("SECRET_KEY")
@@ -23,14 +26,19 @@ CHUNK_OVERLAP = 50
 TOP_K = 3
 MIN_SIMILARITY = 0.5
 
+TEXT_EXTENSIONS = {".txt"}
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
+PDF_EXTENSIONS = {".pdf"}
+ALLOWED_EXTENSIONS = TEXT_EXTENSIONS | IMAGE_EXTENSIONS | PDF_EXTENSIONS
+MIN_PDF_TEXT_LENGTH = 20  # below this, assume it's a scanned PDF with no real text
+VISION_MODEL = "qwen2.5vl:3b"
+MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
+
 security = HTTPBearer()
 password_hash = PasswordHash.recommended()
 
-# username -> {"chunks": [(filename, text), ...], "embeddings": [...]}
 user_index = {}
 
-
-# ---------- Users (unchanged) ----------
 
 def get_user_db_connection():
     return sqlite3.connect("users.db")
@@ -80,8 +88,6 @@ def get_current_username(credentials: HTTPAuthorizationCredentials = Depends(sec
         raise HTTPException(status_code=401, detail="Invalid token")
 
 
-# ---------- RAG helpers ----------
-
 def get_embedding(text):
     response = ollama.embed(model="nomic-embed-text", input=text)
     return response["embeddings"][0]
@@ -105,14 +111,24 @@ def split_into_chunks(text, chunk_size=CHUNK_SIZE, overlap=CHUNK_OVERLAP):
         start += chunk_size - overlap
     return chunks
 
+def extract_pdf_text(contents):
+    reader = PdfReader(io.BytesIO(contents))
+    pages = []
+    for page in reader.pages:
+        pages.append(page.extract_text() or "")
+    return "\n\n".join(pages).strip()
 
 def load_user_documents(username):
-    """Read every file in this user's folder, chunk it, embed it."""
+    """Chunk and embed every .txt file in this user's folder.
+    Raw image files are skipped here on purpose — only their generated
+    .description.txt (created at upload time) gets indexed."""
     user_folder = os.path.join(DOCUMENTS_FOLDER, username)
     chunks = []
 
     if os.path.exists(user_folder):
         for filename in os.listdir(user_folder):
+            if not filename.endswith(".txt"):
+                continue
             filepath = os.path.join(user_folder, filename)
             with open(filepath, "r") as file:
                 text = file.read()
@@ -184,22 +200,68 @@ def login(payload: UserLogin):
 
 @app.post("/documents/upload")
 def upload_document(file: UploadFile = File(...), username: str = Depends(get_current_username)):
+    original_name = file.filename
+    ext = os.path.splitext(original_name)[1].lower()
+
+    if ext not in ALLOWED_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail="Only .txt files, images (.jpg, .jpeg, .png, .webp), and text-based .pdf files are supported"
+        )
+
+    contents = file.file.read()
+
+    if len(contents) == 0:
+        raise HTTPException(status_code=400, detail="That file is empty")
+
+    if len(contents) > MAX_FILE_SIZE:
+        raise HTTPException(status_code=400, detail="File is too large (max 10MB)")
+
+    # For PDFs, check there's actual readable text BEFORE saving anything —
+    # this is what quietly rejects scanned/image-only PDFs
+    extracted_pdf_text = None
+    if ext == ".pdf":
+        extracted_pdf_text = extract_pdf_text(contents)
+        if len(extracted_pdf_text) < MIN_PDF_TEXT_LENGTH:
+            raise HTTPException(
+                status_code=400,
+                detail="This PDF doesn't contain readable text (it may be a scanned document). Please upload a text-based PDF instead."
+            )
+
+    safe_name = re.sub(r"[^A-Za-z0-9_.-]", "_", os.path.basename(original_name))
+
     user_folder = os.path.join(DOCUMENTS_FOLDER, username)
     os.makedirs(user_folder, exist_ok=True)
 
-    filepath = os.path.join(user_folder, file.filename)
-    contents = file.file.read()
+    filepath = os.path.join(user_folder, safe_name)
     with open(filepath, "wb") as f:
         f.write(contents)
 
-    # Re-index just this user, so the new file is searchable immediately
+    if ext in IMAGE_EXTENSIONS:
+        description_response = ollama.chat(
+            model=VISION_MODEL,
+            messages=[{
+                "role": "user",
+                "content": "Describe this image in detail, including any visible text.",
+                "images": [contents]
+            }]
+        )
+        description = description_response["message"]["content"]
+        with open(filepath + ".description.txt", "w") as f:
+            f.write(f"[Image: {safe_name}]\n\n{description}")
+
+    elif ext == ".pdf":
+        with open(filepath + ".extracted.txt", "w") as f:
+            f.write(f"[PDF: {safe_name}]\n\n{extracted_pdf_text}")
+
     user_index[username] = load_user_documents(username)
 
     return {
         "message": "File uploaded",
-        "filename": file.filename,
+        "filename": safe_name,
         "total_chunks": len(user_index[username]["chunks"])
     }
+
 
 class Question(BaseModel):
     question: str
