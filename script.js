@@ -15,28 +15,105 @@ const answerBox = document.getElementById("answer-box");
 const fileInput = document.getElementById("file-input");
 const uploadButton = document.getElementById("upload-button");
 const uploadMessage = document.getElementById("upload-message");
+const documentsList = document.getElementById("documents-list");
 
 const API_URL = "http://127.0.0.1:8000";
 
 function formatErrorDetail(detail) {
-    if (typeof detail === "string") {
-        return detail;
-    }
+    if (typeof detail === "string") return detail;
     if (Array.isArray(detail)) {
         return detail.map(function (err) { return err.msg; }).join(", ");
     }
     return "Something went wrong.";
 }
 
+function formatSize(bytes) {
+    if (bytes < 1024) return bytes + " B";
+    return (bytes / 1024).toFixed(1) + " KB";
+}
+
 function showLoggedIn(username) {
     authSection.style.display = "none";
     appSection.style.display = "block";
     currentUsernameSpan.textContent = username;
+    loadDocuments();
 }
 
 function showLoggedOut() {
     authSection.style.display = "block";
     appSection.style.display = "none";
+}
+
+async function loadDocuments() {
+    const token = localStorage.getItem("token");
+
+    try {
+        const response = await fetch(`${API_URL}/documents`, {
+            headers: { "Authorization": `Bearer ${token}` }
+        });
+
+        const data = await response.json();
+
+        if (!response.ok) {
+            documentsList.textContent = formatErrorDetail(data.detail);
+            return;
+        }
+
+        if (data.documents.length === 0) {
+            documentsList.textContent = "No documents uploaded yet.";
+            return;
+        }
+
+        documentsList.innerHTML = "";
+
+        for (const doc of data.documents) {
+            const row = document.createElement("div");
+            row.style.display = "flex";
+            row.style.justifyContent = "space-between";
+            row.style.alignItems = "center";
+            row.style.padding = "6px 0";
+
+            const label = document.createElement("span");
+            label.textContent = `${doc.filename} — ${doc.chunks} chunks, ${formatSize(doc.size_bytes)}`;
+
+            const deleteBtn = document.createElement("button");
+            deleteBtn.textContent = "Delete";
+            deleteBtn.addEventListener("click", function () {
+                deleteDocument(doc.filename);
+            });
+
+            row.appendChild(label);
+            row.appendChild(deleteBtn);
+            documentsList.appendChild(row);
+        }
+
+    } catch (error) {
+        documentsList.textContent = "Could not connect to the backend.";
+        console.error(error);
+    }
+}
+
+async function deleteDocument(filename) {
+    const token = localStorage.getItem("token");
+
+    try {
+        const response = await fetch(`${API_URL}/documents/${encodeURIComponent(filename)}`, {
+            method: "DELETE",
+            headers: { "Authorization": `Bearer ${token}` }
+        });
+
+        if (!response.ok) {
+            const data = await response.json();
+            alert(formatErrorDetail(data.detail));
+            return;
+        }
+
+        loadDocuments();
+
+    } catch (error) {
+        alert("Could not connect to the backend.");
+        console.error(error);
+    }
 }
 
 const savedToken = localStorage.getItem("token");
@@ -162,8 +239,6 @@ uploadButton.addEventListener("click", async function () {
     }
 
     const token = localStorage.getItem("token");
-
-    // Files get packed into a FormData "envelope" instead of JSON
     const formData = new FormData();
     formData.append("file", file);
 
@@ -172,11 +247,7 @@ uploadButton.addEventListener("click", async function () {
     try {
         const response = await fetch(`${API_URL}/documents/upload`, {
             method: "POST",
-            headers: {
-                "Authorization": `Bearer ${token}`
-                // Notice: no "Content-Type" header here on purpose.
-                // The browser sets it automatically for FormData, boundary and all.
-            },
+            headers: { "Authorization": `Bearer ${token}` },
             body: formData
         });
 
@@ -189,6 +260,7 @@ uploadButton.addEventListener("click", async function () {
 
         uploadMessage.textContent = `Uploaded "${data.filename}" (${data.total_chunks} chunks total).`;
         fileInput.value = "";
+        loadDocuments();
 
     } catch (error) {
         uploadMessage.textContent = "Could not connect to the backend.";

@@ -4,16 +4,16 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, Field
 from pwdlib import PasswordHash
+from pypdf import PdfReader
 from datetime import datetime, timedelta, timezone
 import ollama
 import math
 import os
 import re
+import io
 import sqlite3
 import jwt
 from dotenv import load_dotenv
-from pypdf import PdfReader
-import io
 
 load_dotenv()
 SECRET_KEY = os.environ.get("SECRET_KEY")
@@ -30,9 +30,9 @@ TEXT_EXTENSIONS = {".txt"}
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
 PDF_EXTENSIONS = {".pdf"}
 ALLOWED_EXTENSIONS = TEXT_EXTENSIONS | IMAGE_EXTENSIONS | PDF_EXTENSIONS
-MIN_PDF_TEXT_LENGTH = 20  # below this, assume it's a scanned PDF with no real text
 VISION_MODEL = "qwen2.5vl:3b"
 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
+MIN_PDF_TEXT_LENGTH = 20
 
 security = HTTPBearer()
 password_hash = PasswordHash.recommended()
@@ -111,6 +111,7 @@ def split_into_chunks(text, chunk_size=CHUNK_SIZE, overlap=CHUNK_OVERLAP):
         start += chunk_size - overlap
     return chunks
 
+
 def extract_pdf_text(contents):
     reader = PdfReader(io.BytesIO(contents))
     pages = []
@@ -118,10 +119,11 @@ def extract_pdf_text(contents):
         pages.append(page.extract_text() or "")
     return "\n\n".join(pages).strip()
 
+
 def load_user_documents(username):
-    """Chunk and embed every .txt file in this user's folder.
-    Raw image files are skipped here on purpose — only their generated
-    .description.txt (created at upload time) gets indexed."""
+    """Chunk and embed every .txt file in this user's folder (this
+    includes original .txt uploads AND generated .description.txt /
+    .extracted.txt sidecars from images and PDFs)."""
     user_folder = os.path.join(DOCUMENTS_FOLDER, username)
     chunks = []
 
@@ -217,8 +219,6 @@ def upload_document(file: UploadFile = File(...), username: str = Depends(get_cu
     if len(contents) > MAX_FILE_SIZE:
         raise HTTPException(status_code=400, detail="File is too large (max 10MB)")
 
-    # For PDFs, check there's actual readable text BEFORE saving anything —
-    # this is what quietly rejects scanned/image-only PDFs
     extracted_pdf_text = None
     if ext == ".pdf":
         extracted_pdf_text = extract_pdf_text(contents)
@@ -261,6 +261,62 @@ def upload_document(file: UploadFile = File(...), username: str = Depends(get_cu
         "filename": safe_name,
         "total_chunks": len(user_index[username]["chunks"])
     }
+
+
+@app.get("/documents")
+def list_documents(username: str = Depends(get_current_username)):
+    user_folder = os.path.join(DOCUMENTS_FOLDER, username)
+    documents = []
+
+    if os.path.exists(user_folder):
+        for filename in os.listdir(user_folder):
+            # Sidecar files (generated descriptions/extractions) aren't
+            # "documents" the user uploaded themselves — skip them here
+            if filename.endswith(".description.txt") or filename.endswith(".extracted.txt"):
+                continue
+
+            ext = os.path.splitext(filename)[1].lower()
+            if ext in IMAGE_EXTENSIONS:
+                source_name = filename + ".description.txt"
+            elif ext in PDF_EXTENSIONS:
+                source_name = filename + ".extracted.txt"
+            else:
+                source_name = filename
+
+            user_data = user_index.get(username)
+            chunk_count = 0
+            if user_data:
+                chunk_count = sum(1 for fname, _ in user_data["chunks"] if fname == source_name)
+
+            filepath = os.path.join(user_folder, filename)
+            documents.append({
+                "filename": filename,
+                "size_bytes": os.path.getsize(filepath),
+                "chunks": chunk_count
+            })
+
+    return {"documents": documents}
+
+
+@app.delete("/documents/{filename}")
+def delete_document(filename: str, username: str = Depends(get_current_username)):
+    safe_filename = os.path.basename(filename)  # guards against path tricks
+    user_folder = os.path.join(DOCUMENTS_FOLDER, username)
+    filepath = os.path.join(user_folder, safe_filename)
+
+    if not os.path.exists(filepath):
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    os.remove(filepath)
+
+    for suffix in (".description.txt", ".extracted.txt"):
+        sidecar = filepath + suffix
+        if os.path.exists(sidecar):
+            os.remove(sidecar)
+
+    user_index[username] = load_user_documents(username)
+
+    return {"message": "Document deleted", "filename": safe_filename}
 
 
 class Question(BaseModel):
