@@ -20,9 +20,16 @@ const documentsList = document.getElementById("documents-list");
 const API_URL = "http://127.0.0.1:8000";
 
 function formatErrorDetail(detail) {
-    if (typeof detail === "string") return detail;
+    if (typeof detail === "string") {
+        return detail;
+    }
     if (Array.isArray(detail)) {
-        return detail.map(function (err) { return err.msg; }).join(", ");
+        return detail.map(function (err) {
+            // Pydantic errors look like: { loc: ["body", "username"], msg: "...", type: "..." }
+            const field = err.loc && err.loc.length > 0 ? err.loc[err.loc.length - 1] : null;
+            const label = field ? field.charAt(0).toUpperCase() + field.slice(1) : "Field";
+            return `${label}: ${err.msg}`;
+        }).join(" | ");
     }
     return "Something went wrong.";
 }
@@ -126,8 +133,17 @@ if (savedToken && savedUsername) {
 }
 
 registerButton.addEventListener("click", async function () {
-    const username = authUsername.value;
+    const username = authUsername.value.trim();
     const password = authPassword.value;
+
+    if (username.length < 3) {
+        authMessage.textContent = "Username must be at least 3 characters.";
+        return;
+    }
+    if (password.length < 6) {
+        authMessage.textContent = "Password must be at least 6 characters.";
+        return;
+    }
 
     try {
         const response = await fetch(`${API_URL}/register`, {
@@ -152,8 +168,13 @@ registerButton.addEventListener("click", async function () {
 });
 
 loginButton.addEventListener("click", async function () {
-    const username = authUsername.value;
+    const username = authUsername.value.trim();
     const password = authPassword.value;
+
+    if (username === "" || password === "") {
+        authMessage.textContent = "Please enter both a username and password.";
+        return;
+    }
 
     try {
         const response = await fetch(`${API_URL}/login`, {
