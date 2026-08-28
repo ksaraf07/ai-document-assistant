@@ -208,9 +208,11 @@ logoutButton.addEventListener("click", function () {
 });
 
 askButton.addEventListener("click", async function () {
-    const question = questionInput.value;
-    if (question === "") return;
-
+    const question = questionInput.value.trim();
+    if (question === "") {
+        answerBox.textContent = "Please enter a question.";
+        return;
+    }
     const token = localStorage.getItem("token");
     answerBox.textContent = "Thinking...";
 
